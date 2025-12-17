@@ -1,0 +1,396 @@
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+import sqlite3
+import os
+import pandas as pd
+from datetime import datetime
+import sys
+
+# ================= FIX PATH FOR PYINSTALLER =================
+def get_base_dir():
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+BASE_DIR = get_base_dir()
+
+# ---------------- USERS DATABASE ----------------
+users_db_path = os.path.join(BASE_DIR, "users.db")
+conn_users = sqlite3.connect(users_db_path)
+cursor_users = conn_users.cursor()
+
+cursor_users.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    login TEXT UNIQUE,
+    password TEXT
+)
+""")
+conn_users.commit()
+
+# ---------------- USER DATABASE ----------------
+conn_user = None
+cursor_user = None
+
+def create_user_db(login):
+    user_db_path = os.path.join(BASE_DIR, f"user_{login}.db")
+    conn = sqlite3.connect(user_db_path)
+    cursor = conn.cursor()
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS equipment (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        power INTEGER,
+        status TEXT
+    )
+    """)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS workers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fullname TEXT NOT NULL,
+        position TEXT,
+        shift TEXT
+    )
+    """)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS maintenance (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        equipment_id INTEGER,
+        date TEXT,
+        note TEXT,
+        FOREIGN KEY(equipment_id) REFERENCES equipment(id)
+    )
+    """)
+    conn.commit()
+    conn.close()
+
+# ---------------- REGISTRATION ----------------
+def register_user_window():
+    reg_win = tk.Toplevel()
+    reg_win.title("Регистрация")
+    reg_win.geometry("360x240")
+    reg_win.configure(bg="#e0e0e0")
+
+    ttk.Label(reg_win, text="Логин:").pack(pady=5)
+    reg_login = ttk.Entry(reg_win)
+    reg_login.pack(pady=5)
+
+    ttk.Label(reg_win, text="Пароль:").pack(pady=5)
+    reg_password = ttk.Entry(reg_win, show="*")
+    reg_password.pack(pady=5)
+
+    ttk.Label(reg_win, text="Повторите пароль:").pack(pady=5)
+    reg_confirm = ttk.Entry(reg_win, show="*")
+    reg_confirm.pack(pady=5)
+
+    def register_user():
+        login_val = reg_login.get().strip()
+        pass_val = reg_password.get().strip()
+        conf_val = reg_confirm.get().strip()
+        if not login_val or not pass_val or not conf_val:
+            messagebox.showwarning("Ошибка", "Все поля должны быть заполнены")
+            return
+        if pass_val != conf_val:
+            messagebox.showerror("Ошибка", "Пароли не совпадают")
+            return
+        try:
+            cursor_users.execute(
+                "INSERT INTO users (login, password) VALUES (?, ?)",
+                (login_val, pass_val)
+            )
+            conn_users.commit()
+            create_user_db(login_val)
+            messagebox.showinfo("Успех", "Пользователь зарегистрирован")
+            reg_win.destroy()
+        except sqlite3.IntegrityError:
+            messagebox.showerror("Ошибка", "Логин уже существует")
+
+    ttk.Button(reg_win, text="Зарегистрироваться", command=register_user, width=20).pack(pady=15)
+
+# ---------------- LOGIN ----------------
+def login_user():
+    global conn_user, cursor_user
+    login_val = login_entry.get().strip()
+    pass_val = password_entry.get().strip()
+    if not login_val or not pass_val:
+        messagebox.showwarning("Ошибка", "Введите логин и пароль")
+        return
+    cursor_users.execute(
+        "SELECT * FROM users WHERE login=? AND password=?",
+        (login_val, pass_val)
+    )
+    if cursor_users.fetchone():
+        user_db_path = os.path.join(BASE_DIR, f"user_{login_val}.db")
+        conn_user = sqlite3.connect(user_db_path)
+        cursor_user = conn_user.cursor()
+        login_window.destroy()
+        open_main()
+    else:
+        messagebox.showerror("Ошибка", "Неверный логин или пароль")
+
+# ---------------- MAIN FUNCTIONS ----------------
+# --- Equipment ---
+def add_equipment():
+    try:
+        power_val = int(eq_power.get())
+    except ValueError:
+        messagebox.showerror("Ошибка", "Мощность должна быть числом")
+        return
+    cursor_user.execute(
+        "INSERT INTO equipment (name, power, status) VALUES (?, ?, ?)",
+        (eq_name.get(), power_val, eq_status.get())
+    )
+    conn_user.commit()
+    load_equipment()
+    load_equipment_options()
+    eq_name.delete(0, tk.END)
+    eq_power.delete(0, tk.END)
+    eq_status.delete(0, tk.END)
+
+def delete_equipment():
+    selected = eq_table.selection()
+    if not selected:
+        messagebox.showwarning("Ошибка", "Выберите запись для удаления")
+        return
+    eq_id = eq_table.item(selected[0])['values'][0]
+    cursor_user.execute("DELETE FROM equipment WHERE id=?", (eq_id,))
+    conn_user.commit()
+    load_equipment()
+    load_equipment_options()
+
+def load_equipment():
+    eq_table.delete(*eq_table.get_children())
+    cursor_user.execute("SELECT * FROM equipment")
+    for row in cursor_user.fetchall():
+        eq_table.insert("", tk.END, values=(row[0], row[1], f"{row[2]} кВт", row[3]))
+
+def export_equipment():
+    df = pd.read_sql_query("SELECT * FROM equipment", conn_user)
+    file = filedialog.asksaveasfilename(defaultextension=".xlsx")
+    if file:
+        df.to_excel(file, index=False)
+
+def import_equipment():
+    file = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx")])
+    if file:
+        df = pd.read_excel(file)
+        df.to_sql("equipment", conn_user, if_exists="append", index=False)
+        load_equipment()
+        load_equipment_options()
+
+# --- Workers ---
+def add_worker():
+    cursor_user.execute(
+        "INSERT INTO workers (fullname, position, shift) VALUES (?, ?, ?)",
+        (worker_name.get(), worker_position.get(), worker_shift.get())
+    )
+    conn_user.commit()
+    load_workers()
+    worker_name.delete(0, tk.END)
+    worker_position.delete(0, tk.END)
+    worker_shift.set('')
+
+def delete_worker():
+    selected = worker_table.selection()
+    if not selected:
+        messagebox.showwarning("Ошибка", "Выберите запись для удаления")
+        return
+    worker_id = worker_table.item(selected[0])['values'][0]
+    cursor_user.execute("DELETE FROM workers WHERE id=?", (worker_id,))
+    conn_user.commit()
+    load_workers()
+
+def load_workers():
+    worker_table.delete(*worker_table.get_children())
+    cursor_user.execute("SELECT * FROM workers")
+    for row in cursor_user.fetchall():
+        worker_table.insert("", tk.END, values=row)
+
+# --- Maintenance ---
+equipment_options = []
+
+def load_equipment_options():
+    global equipment_options
+    cursor_user.execute("SELECT id, name FROM equipment")
+    equipment_options = cursor_user.fetchall()
+    maintenance_eq_combobox['values'] = [f"{id} - {name}" for id, name in equipment_options]
+
+def add_maintenance():
+    selected = maintenance_eq_combobox.get()
+    if not selected:
+        messagebox.showerror("Ошибка", "Выберите оборудование")
+        return
+    eq_id = int(selected.split(" - ")[0])
+    try:
+        datetime.strptime(maintenance_date.get(), "%Y-%m-%d")
+    except ValueError:
+        messagebox.showerror("Ошибка", "Неверный формат даты. Используйте YYYY-MM-DD")
+        return
+    cursor_user.execute(
+        "INSERT INTO maintenance (equipment_id, date, note) VALUES (?, ?, ?)",
+        (eq_id, maintenance_date.get(), maintenance_note.get())
+    )
+    conn_user.commit()
+    load_maintenance()
+    maintenance_eq_combobox.set('')
+    maintenance_date.delete(0, tk.END)
+    maintenance_note.delete(0, tk.END)
+
+def delete_maintenance():
+    selected = maintenance_table.selection()
+    if not selected:
+        messagebox.showwarning("Ошибка", "Выберите запись для удаления")
+        return
+    maint_id = maintenance_table.item(selected[0])['values'][0]
+    cursor_user.execute("DELETE FROM maintenance WHERE id=?", (maint_id,))
+    conn_user.commit()
+    load_maintenance()
+
+def load_maintenance():
+    maintenance_table.delete(*maintenance_table.get_children())
+    cursor_user.execute("""
+        SELECT m.id, e.name, m.date, m.note
+        FROM maintenance m
+        JOIN equipment e ON m.equipment_id = e.id
+    """)
+    for row in cursor_user.fetchall():
+        maintenance_table.insert("", tk.END, values=row)
+
+# ---------------- MAIN WINDOW ----------------
+def open_main():
+    global eq_name, eq_power, eq_status, eq_table
+    global worker_name, worker_position, worker_shift, worker_table
+    global maintenance_eq_combobox, maintenance_date, maintenance_note, maintenance_table
+
+    root = tk.Tk()
+    root.title("ИС управления производственными ресурсами")
+    root.geometry("1050x650")
+    root.configure(bg="#f0f0f0")
+
+    notebook = ttk.Notebook(root)
+    notebook.pack(expand=True, fill="both", padx=10, pady=10)
+
+    # --- Equipment ---
+    frame_eq = ttk.Frame(notebook, padding=10)
+    notebook.add(frame_eq, text="Оборудование")
+
+    eq_frame = ttk.LabelFrame(frame_eq, text="Добавление оборудования", padding=10)
+    eq_frame.pack(fill="x", padx=5, pady=5)
+
+    ttk.Label(eq_frame, text="Название:").grid(row=0, column=0, sticky="w", pady=5)
+    eq_name = ttk.Entry(eq_frame, width=30)
+    eq_name.grid(row=0, column=1, pady=5)
+
+    ttk.Label(eq_frame, text="Мощность (кВт):").grid(row=1, column=0, sticky="w", pady=5)
+    eq_power = ttk.Entry(eq_frame, width=30)
+    eq_power.grid(row=1, column=1, pady=5)
+
+    ttk.Label(eq_frame, text="Статус:").grid(row=2, column=0, sticky="w", pady=5)
+    eq_status = ttk.Entry(eq_frame, width=30)
+    eq_status.grid(row=2, column=1, pady=5)
+
+    ttk.Button(eq_frame, text="Добавить", command=add_equipment, width=15).grid(row=3, column=0, pady=10)
+    ttk.Button(eq_frame, text="Удалить", command=delete_equipment, width=15).grid(row=3, column=1, pady=10)
+
+    eq_table = ttk.Treeview(frame_eq, columns=("ID", "Название", "Мощность", "Статус"), show="headings", height=12)
+    for col in eq_table["columns"]:
+        eq_table.heading(col, text=col)
+        eq_table.column(col, width=150, anchor="center")
+    eq_table.pack(fill="both", expand=True, pady=10)
+    load_equipment()
+
+    # --- Workers ---
+    frame_worker = ttk.Frame(notebook, padding=10)
+    notebook.add(frame_worker, text="Сотрудники")
+
+    worker_frame = ttk.LabelFrame(frame_worker, text="Добавление сотрудника", padding=10)
+    worker_frame.pack(fill="x", padx=5, pady=5)
+
+    ttk.Label(worker_frame, text="ФИО:").grid(row=0, column=0, sticky="w", pady=5)
+    worker_name = ttk.Entry(worker_frame, width=30)
+    worker_name.grid(row=0, column=1, pady=5)
+
+    ttk.Label(worker_frame, text="Должность:").grid(row=1, column=0, sticky="w", pady=5)
+    worker_position = ttk.Entry(worker_frame, width=30)
+    worker_position.grid(row=1, column=1, pady=5)
+
+    ttk.Label(worker_frame, text="Смена:").grid(row=2, column=0, sticky="w", pady=5)
+    worker_shift = ttk.Combobox(worker_frame, width=27, values=["День", "Вечер", "Ночь"])
+    worker_shift.grid(row=2, column=1, pady=5)
+
+    ttk.Button(worker_frame, text="Добавить", command=add_worker, width=15).grid(row=3, column=0, pady=10)
+    ttk.Button(worker_frame, text="Удалить", command=delete_worker, width=15).grid(row=3, column=1, pady=10)
+
+    worker_table = ttk.Treeview(frame_worker, columns=("ID", "ФИО", "Должность", "Смена"), show="headings", height=12)
+    for col in worker_table["columns"]:
+        worker_table.heading(col, text=col)
+        worker_table.column(col, width=150, anchor="center")
+    worker_table.pack(fill="both", expand=True, pady=10)
+    load_workers()
+
+    # --- Maintenance ---
+    frame_maint = ttk.Frame(notebook, padding=10)
+    notebook.add(frame_maint, text="ТО")
+
+    maint_frame = ttk.LabelFrame(frame_maint, text="Добавление ТО", padding=10)
+    maint_frame.pack(fill="x", padx=5, pady=5)
+
+    ttk.Label(maint_frame, text="Оборудование:").grid(row=0, column=0, sticky="w", pady=5)
+    maintenance_eq_combobox = ttk.Combobox(maint_frame, width=27)
+    maintenance_eq_combobox.grid(row=0, column=1, pady=5)
+
+    ttk.Label(maint_frame, text="Дата (YYYY-MM-DD):").grid(row=1, column=0, sticky="w", pady=5)
+    maintenance_date = ttk.Entry(maint_frame, width=30)
+    maintenance_date.grid(row=1, column=1, pady=5)
+
+    def on_date_entry(event):
+        text = maintenance_date.get().replace("-", "")
+        if len(text) > 4:
+            text = text[:4] + "-" + text[4:]
+        if len(text) > 7:
+            text = text[:7] + "-" + text[7:]
+        maintenance_date.delete(0, tk.END)
+        maintenance_date.insert(0, text)
+
+    maintenance_date.bind("<KeyRelease>", on_date_entry)
+
+    ttk.Label(maint_frame, text="Примечание:").grid(row=2, column=0, sticky="w", pady=5)
+    maintenance_note = ttk.Entry(maint_frame, width=30)
+    maintenance_note.grid(row=2, column=1, pady=5)
+
+    ttk.Button(maint_frame, text="Добавить ТО", command=add_maintenance, width=15).grid(row=3, column=0, pady=10)
+    ttk.Button(maint_frame, text="Удалить ТО", command=delete_maintenance, width=15).grid(row=3, column=1, pady=10)
+
+    maintenance_table = ttk.Treeview(
+        frame_maint,
+        columns=("ID", "Оборудование", "Дата", "Примечание"),
+        show="headings",
+        height=12
+    )
+    for col in maintenance_table["columns"]:
+        maintenance_table.heading(col, text=col)
+        maintenance_table.column(col, width=150, anchor="center")
+    maintenance_table.pack(fill="both", expand=True, pady=10)
+
+    load_maintenance()
+    load_equipment_options()
+    root.mainloop()
+
+# ---------------- LOGIN WINDOW ----------------
+login_window = tk.Tk()
+login_window.title("Авторизация")
+login_window.geometry("360x220")
+login_window.configure(bg="#e0e0e0")
+
+ttk.Label(login_window, text="Логин:").pack(pady=5)
+login_entry = ttk.Entry(login_window)
+login_entry.pack(pady=5)
+
+ttk.Label(login_window, text="Пароль:").pack(pady=5)
+password_entry = ttk.Entry(login_window, show="*")
+password_entry.pack(pady=5)
+
+ttk.Button(login_window, text="Войти", command=login_user, width=15).pack(pady=10)
+ttk.Button(login_window, text="Регистрация", command=register_user_window, width=15).pack(pady=5)
+
+login_window.mainloop()
